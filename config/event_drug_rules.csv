@@ -1,0 +1,27 @@
+event_pattern,agent_pattern,decision,notes
+(?i)azacit,(?i)^AZACITIDINE$,INCLUDE,Direct event-to-agent match
+(?i)daratumumab,(?i)^DARATUMUMAB$,INCLUDE,Direct event-to-agent match
+(?i)cabazitaxel,(?i)^CABAZITAXEL$,INCLUDE,Direct event-to-agent match
+(?i)gemcitabine,(?i)^GEMCITABINE$,INCLUDE,Direct event-to-agent match
+(?i)paclitaxel,(?i)^PACLITAXEL$,INCLUDE,Direct event-to-agent match
+(?i)gem/abraxane,(?i)^(GEMCITABINE|PACLITAXEL ALBUMIN BOUND)$,INCLUDE,Regimen rule for local review
+(?i)folfox,(?i)^(OXALIPLATIN|FOLINIC ACID|FLUOROURACIL)$,INCLUDE,Regimen rule for local review
+(?i)oxaliplatin,(?i)^OXALIPLATIN$,INCLUDE,Direct event-to-agent match
+(?i)rituximab,(?i)^RITUXIMAB$,INCLUDE,Direct event-to-agent match
+(?i)bendamustine,(?i)^BENDAMUSTINE$,INCLUDE,Direct event-to-agent match
+(?i)r-polo-chp,(?i)^(RITUXIMAB|POLATUZUMAB VEDOTIN|DOXORUBICIN|CYCLOPHOSPHAMIDE)$,INCLUDE,Regimen rule for local review
+(?i)pembro,(?i)^PEMBROLIZUMAB$,INCLUDE,Direct event-to-agent match
+(?i)EV\b,(?i)^ENFORTUMAB VEDOTIN$,INCLUDE,Event abbreviation rule for local review
+(?i)ipili/nivolumab,(?i)^(IPILIMUMAB|NIVOLUMAB)$,INCLUDE,Regimen rule for local review
+(?i)carbo/paclitaxel,(?i)^(CARBOPLATIN|PACLITAXEL)$,INCLUDE,Regimen rule for local review
+(?i)carbo/pembro/pacli,(?i)^(CARBOPLATIN|PACLITAXEL|PEMBROLIZUMAB)$,INCLUDE,Regimen rule for local review
+(?i)carbo/pemetrexed,(?i)^(CARBOPLATIN|PEMETREXED)$,INCLUDE,Regimen rule for local review
+(?i)cisplatin/gem,(?i)^(CISPLATIN|GEMCITABINE)$,INCLUDE,Regimen rule for local review
+(?i)cetuximab,(?i)^CETUXIMAB$,INCLUDE,Direct event-to-agent match
+(?i)kadcyla,(?i)^KADCYLA$,INCLUDE,Direct event-to-agent match
+(?i)mirvetuximab,(?i)^MIRVETUXIMAB SORAVTANSINE$,INCLUDE,Direct event-to-agent match
+(?i)opdualag|nivolumab.*relat,(?i)^OPDUALAG,INCLUDE,Direct event-to-agent match
+(?i)tras/pertuz,(?i)^PERTUZUMAB/TRASTUZUMAB,INCLUDE,Direct event-to-agent match
+(?i)tras\s*s/c,(?i)^TRASTUZUMAB$,INCLUDE,Direct event-to-agent match
+(?i)vinorelbine,(?i)^VINORELBINE$,INCLUDE,Direct event-to-agent match
+(?i)elranat,(?i)^ELRANATAMAB$,INCLUDE,Direct event-to-agent match

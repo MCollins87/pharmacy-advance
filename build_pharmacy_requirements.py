@@ -37,7 +37,10 @@ from pypdf import PdfReader
 # Operational configuration
 # ---------------------------------------------------------------------------
 
-BASE_DIR = Path(r"C:\IDR\PharmacyAdvance")
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).parent
+else:
+    BASE_DIR = Path(__file__).parent
 
 INPUT_DIR = BASE_DIR / "Input"
 OUTPUT_DIR = BASE_DIR / "Output"
