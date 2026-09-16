@@ -1,23 +1,16 @@
 #!/usr/bin/env python3
-"""Build a pharmacy advance-preparation workbook from ARIA reports.
+"""Build the four-tab ARIA pharmacy planning workbook.
 
-Operational source hierarchy:
-1. sch_by_inst_pt_excel_vprov.xls supplies attendance date/time, NHS number,
-   scheduled event, and visit provider.
-2. pharm_reqmt.xls supplies drug, dose, prescription physician, administration
-   date, and the dispensed/verified indicators.
-3. ptmeds_sch_time.pdf is used only as a fallback for scheduled patients who
-   have no included preparation item in pharm_reqmt.xls.
+Source precedence:
+1. sch_inst_by_pt_sum_adel.xls is the authoritative daily schedule.
+2. pharm_reqmt.xls is the preferred medication source. Matching lines are Approved.
+3. ptmeds_sch_time.pdf is the fallback medication source. Matching lines are Planned.
 
-The script requires no command-line arguments. Edit BASE_DIR below if needed.
-Inputs are archived only after a non-empty workbook has been saved.
-
-This is a planning/reconciliation aid. It does not calculate doses and does
-not replace verification against the current authorised ARIA prescription.
+The output is a planning/reconciliation aid. It does not calculate doses and it
+must not replace verification against the current authorised ARIA prescription.
 """
 from __future__ import annotations
 
-import csv
 import logging
 import re
 import shutil
@@ -33,34 +26,33 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from pypdf import PdfReader
 
-# ---------------------------------------------------------------------------
-# Operational configuration
-# ---------------------------------------------------------------------------
-
 BASE_DIR = Path(r"C:\IDR\PharmacyAdvance")
-
 INPUT_DIR = BASE_DIR / "Input"
 OUTPUT_DIR = BASE_DIR / "Output"
 ARCHIVE_DIR = BASE_DIR / "Archive"
-CONFIG_DIR = BASE_DIR / "Config"
 LOG_DIR = BASE_DIR / "Logs"
 
-SCHEDULE_FILENAME = "sch_by_inst_pt_excel_vprov.xls"
+SCHEDULE_FILENAME = "sch_inst_by_pt_sum_adel.xls"
 PHARMACY_FILENAME = "pharm_reqmt.xls"
 PDF_FILENAME = "ptmeds_sch_time.pdf"
-AGENT_RULES_FILENAME = "agent_preparation_rules.csv"
-EVENT_RULES_FILENAME = "event_drug_rules.csv"
 
+SCHEDULE_REPORT_TITLE = "Schedule - Institution by Patient and Time - Summary"
 PHARMACY_REPORT_TITLE = (
     "Pharmacy Requirements - by Agent, Rx Type, Administration Date and Patient"
 )
 PDF_REPORT_TITLE = "Patient Medications - Patients Scheduled to Visit - by Time"
 
+OUTPUT_HEADERS = [
+    "Administration date", "Appointment time", "Patient ID", "Patient",
+    "Prescription physician", "Visit provider", "Scheduled event(s)",
+    "Drug", "Dose", "Route", "Dispensed", "Verified", "Source",
+    "Source reference", "Status / reason",
+]
+
 PDF_PATIENT_RE = re.compile(
     r"Start Time:\s*(?P<date>[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})\s+"
     r"(?P<time>\d{1,2}:\d{2})\s+Event Provider:.*?\n"
-    r"(?P<patient>.+?)\s+NHS Number:\s*(?P<nhs>\d{10})\b",
-    re.S,
+    r"(?P<patient>.+?)\s+NHS Number:\s*(?P<nhs>\d{10})\b", re.S,
 )
 PDF_SECTION_RE = re.compile(
     r"^(Chemo|Hormone|Immunotherapy|Supportive|Pharmacy:)\s*$", re.I
@@ -72,35 +64,15 @@ PDF_DATE_AT_END_RE = re.compile(
     r"(?:\s+[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})?\s*$"
 )
 
-OUTPUT_HEADERS = [
-    "Administration date",
-    "Appointment time",
-    "Patient ID",
-    "Patient",
-    "Prescription physician",
-    "Visit provider",
-    "Scheduled event(s)",
-    "Drug",
-    "Dose",
-    "Route",
-    "Dispensed",
-    "Verified",
-    "Source",
-    "Source reference",
-    "Status / reason",
-]
-
 
 @dataclass(frozen=True)
 class ScheduleRow:
-    institution: str
     nhs_number: str
     patient: str
     event_dt: datetime
-    start_dt: datetime
-    end_dt: datetime
     event: str
     visit_provider: str
+    location: str
     comments: str
     source_row: int
 
@@ -118,6 +90,15 @@ class PharmacyRequirement:
 
 
 @dataclass(frozen=True)
+class PdfPatient:
+    visit_date: date
+    visit_time: datetime
+    nhs_number: str
+    patient: str
+    page: int
+
+
+@dataclass(frozen=True)
 class PdfMedication:
     visit_date: date
     visit_time: datetime
@@ -130,10 +111,6 @@ class PdfMedication:
     route: str
     page: int
 
-
-# ---------------------------------------------------------------------------
-# General helpers
-# ---------------------------------------------------------------------------
 
 def clean(value) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
@@ -152,7 +129,6 @@ def normalise_nhs_number(value) -> str:
 
 
 def patient_match_key(value) -> str:
-    """Use normalised surname and first forename for cross-report matching."""
     text = clean(value).upper()
     if not text:
         return ""
@@ -160,11 +136,9 @@ def patient_match_key(value) -> str:
         surname, forenames = text.split(",", 1)
     else:
         parts = text.split()
-        surname = parts[0]
-        forenames = " ".join(parts[1:])
-    first_names = re.findall(r"[A-Z0-9]+", forenames)
-    first_name = first_names[0] if first_names else ""
-    return f"{normalise(surname)}|{normalise(first_name)}"
+        surname, forenames = parts[0], " ".join(parts[1:])
+    names = re.findall(r"[A-Z0-9]+", forenames)
+    return f"{normalise(surname)}|{normalise(names[0] if names else '')}"
 
 
 def parse_excel_datetime(value, datemode: int) -> datetime | None:
@@ -173,9 +147,10 @@ def parse_excel_datetime(value, datemode: int) -> datetime | None:
     if isinstance(value, (int, float)):
         return xlrd.xldate_as_datetime(value, datemode)
     text = clean(value)
-    for date_format in ("%b %d, %Y", "%d/%m/%Y", "%Y-%m-%d"):
+    for fmt in ("%b %d, %Y %H:%M", "%d/%m/%Y %H:%M", "%Y-%m-%d %H:%M",
+                "%b %d, %Y", "%d/%m/%Y", "%Y-%m-%d"):
         try:
-            return datetime.strptime(text, date_format)
+            return datetime.strptime(text, fmt)
         except ValueError:
             pass
     return None
@@ -183,9 +158,9 @@ def parse_excel_datetime(value, datemode: int) -> datetime | None:
 
 def parse_text_date(value) -> date | None:
     text = clean(value)
-    for date_format in ("%b %d, %Y", "%d/%m/%Y", "%Y-%m-%d"):
+    for fmt in ("%b %d, %Y", "%d/%m/%Y", "%Y-%m-%d"):
         try:
-            return datetime.strptime(text, date_format).date()
+            return datetime.strptime(text, fmt).date()
         except ValueError:
             pass
     return None
@@ -195,66 +170,43 @@ def format_dose(amount, unit) -> str:
     if amount in (None, ""):
         return ""
     if isinstance(amount, float) and amount.is_integer():
-        amount_text = str(int(amount))
-    else:
-        amount_text = clean(amount)
-    return clean(f"{amount_text} {unit}")
+        amount = int(amount)
+    return clean(f"{amount} {unit}")
 
 
-def extract_pdf_dose(full_text: str) -> str:
-    text = re.sub(r"^Prescribed:\s*", "", clean(full_text), flags=re.I)
+def extract_pdf_dose(text: str) -> str:
+    text = re.sub(r"^Prescribed:\s*", "", clean(text), flags=re.I)
     match = re.match(
-        r"(?P<dose>\d[\d,]*(?:\.\d+)?"
-        r"(?:\s*-\s*\d[\d,]*(?:\.\d+)?)?\s*"
+        r"(?P<dose>\d[\d,]*(?:\.\d+)?(?:\s*-\s*\d[\d,]*(?:\.\d+)?)?\s*"
         r"(?:mg|mcg|g|mmol|mL|IU|Units|dose\(s\)|tablet|capsule|injection)"
-        r"(?:\s*\([^)]*\))?)\b",
-        text,
-        re.I,
+        r"(?:\s*\([^)]*\))?)\b", text, re.I,
     )
     return clean(match.group("dose")) if match else ""
 
 
-def extract_route(full_text: str) -> str:
-    for route in (
-        "Subcutaneous",
-        "Intravenous",
-        "Intramuscular",
-        "Oral",
-        "Oromucosal",
-        "Topical",
-        "Ocular",
-        "Inhalation",
-        "Neb",
-        "Unknown",
-        "Not Assigned",
-    ):
-        if re.search(rf"\b{re.escape(route)}\b", full_text, re.I):
+def extract_route(text: str) -> str:
+    for route in ("Subcutaneous", "Intravenous", "Intramuscular", "Oral",
+                  "Oromucosal", "Topical", "Ocular", "Inhalation", "Neb"):
+        if re.search(rf"\b{re.escape(route)}\b", text, re.I):
             return route
     return ""
 
 
-# ---------------------------------------------------------------------------
-# Logging, validation, and archiving
-# ---------------------------------------------------------------------------
-
 def configure_logging() -> Path:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = LOG_DIR / f"pharmacy_advance_{timestamp}.log"
+    path = LOG_DIR / f"pharmacy_advance_{datetime.now():%Y%m%d_%H%M%S}.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.FileHandler(log_path, encoding="utf-8"),
-            logging.StreamHandler(sys.stdout),
-        ],
+        handlers=[logging.FileHandler(path, encoding="utf-8"),
+                  logging.StreamHandler(sys.stdout)],
         force=True,
     )
-    return log_path
+    return path
 
 
 def ensure_folders() -> None:
-    for folder in (INPUT_DIR, OUTPUT_DIR, ARCHIVE_DIR, CONFIG_DIR, LOG_DIR):
+    for folder in (INPUT_DIR, OUTPUT_DIR, ARCHIVE_DIR, LOG_DIR):
         folder.mkdir(parents=True, exist_ok=True)
 
 
@@ -263,206 +215,141 @@ def validate_required_files() -> dict[str, Path]:
         "schedule": INPUT_DIR / SCHEDULE_FILENAME,
         "pharmacy": INPUT_DIR / PHARMACY_FILENAME,
         "pdf": INPUT_DIR / PDF_FILENAME,
-        "agent_rules": CONFIG_DIR / AGENT_RULES_FILENAME,
-        "event_rules": CONFIG_DIR / EVENT_RULES_FILENAME,
     }
-    missing = [path for path in files.values() if not path.exists()]
+    missing = [p for p in files.values() if not p.exists()]
     if missing:
-        formatted = "\n".join(f"  - {path}" for path in missing)
-        raise FileNotFoundError(f"Required files are missing:\n{formatted}")
+        raise FileNotFoundError("Required files are missing:\n" +
+                                "\n".join(f"  - {p}" for p in missing))
     return files
 
 
 def get_available_path(path: Path) -> Path:
     if not path.exists():
         return path
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return path.with_name(f"{path.stem}_{timestamp}{path.suffix}")
+    return path.with_name(f"{path.stem}_{datetime.now():%Y%m%d_%H%M%S}{path.suffix}")
 
 
-def archive_input_files(input_paths: list[Path], administration_date: date) -> Path:
-    run_date = datetime.now().date()
-    archive_folder = (
-        ARCHIVE_DIR
-        / run_date.isoformat()
-        / f"Administration_{administration_date.isoformat()}"
-    )
-    archive_folder.mkdir(parents=True, exist_ok=True)
-    for source_path in input_paths:
-        if not source_path.exists():
-            raise FileNotFoundError(f"Cannot archive missing file: {source_path}")
-        destination = get_available_path(archive_folder / source_path.name)
-        logging.info("Archiving %s to %s", source_path, destination)
-        shutil.move(str(source_path), str(destination))
-    return archive_folder
+def archive_input_files(paths: list[Path], administration_date: date) -> Path:
+    folder = (ARCHIVE_DIR / date.today().isoformat() /
+              f"Administration_{administration_date.isoformat()}")
+    folder.mkdir(parents=True, exist_ok=True)
+    for source in paths:
+        destination = get_available_path(folder / source.name)
+        logging.info("Archiving %s to %s", source, destination)
+        shutil.move(str(source), str(destination))
+    return folder
 
-
-# ---------------------------------------------------------------------------
-# Rules
-# ---------------------------------------------------------------------------
-
-def load_csv_rules(path: Path) -> list[dict[str, str]]:
-    with path.open(newline="", encoding="utf-8-sig") as source:
-        return [
-            {key: clean(value) for key, value in row.items()}
-            for row in csv.DictReader(source)
-        ]
-
-
-def get_agent_decision(agent: str, rules: list[dict[str, str]]) -> tuple[str, str]:
-    for rule in rules:
-        pattern = rule.get("agent_pattern", "")
-        if pattern and re.search(pattern, agent, re.I):
-            return (
-                rule.get("decision", "REVIEW").upper(),
-                rule.get("notes", ""),
-            )
-    return "REVIEW", "Agent is absent from the preparation rules"
-
-
-def get_pdf_event_decision(
-    events: list[str], medication: PdfMedication, rules: list[dict[str, str]]
-) -> tuple[str, str]:
-    matches = []
-    for rule in rules:
-        event_pattern = rule.get("event_pattern", "")
-        agent_pattern = rule.get("agent_pattern", "")
-        if (
-            event_pattern
-            and agent_pattern
-            and any(re.search(event_pattern, event, re.I) for event in events)
-            and re.search(agent_pattern, medication.agent, re.I)
-        ):
-            matches.append(rule)
-    if matches:
-        decisions = {
-            rule.get("decision", "REVIEW").upper() for rule in matches
-        }
-        if len(decisions) == 1:
-            return decisions.pop(), matches[0].get(
-                "notes", "Matched event-to-drug rule"
-            )
-    return "REVIEW", "PDF fallback requires event-to-drug review"
-
-
-# ---------------------------------------------------------------------------
-# Schedule XLS parser
-# ---------------------------------------------------------------------------
 
 def parse_schedule(path: Path) -> list[ScheduleRow]:
+    """Parse the patient-grouped CUSTOM summary report supplied by Pharmacy."""
     workbook = xlrd.open_workbook(path)
     sheet = workbook.sheet_by_index(0)
-    output = []
+    sample = " ".join(clean(sheet.cell_value(r, c))
+                      for r in range(min(15, sheet.nrows))
+                      for c in range(sheet.ncols))
+    if SCHEDULE_REPORT_TITLE.casefold() not in sample.casefold():
+        raise ValueError(f"Unexpected schedule report format: {path.name}")
+
+    output: list[ScheduleRow] = []
+    current_patient = ""
+    current_nhs = ""
+    current_provider = ""
+    current_regimen = ""
+    pending_comments: list[str] = []
+
     for row_index in range(sheet.nrows):
-        row = sheet.row_values(row_index) + [""] * 13
-        event_datetime = parse_excel_datetime(row[5], workbook.datemode)
-        start_datetime = parse_excel_datetime(row[7], workbook.datemode)
-        if not (
-            clean(row[0])
-            and normalise_nhs_number(row[1])
-            and clean(row[4])
-            and event_datetime
-            and start_datetime
-            and clean(row[9])
-        ):
+        row = sheet.row_values(row_index) + [""] * 20
+        col1, col6, col7 = clean(row[1]), row[6], clean(row[7])
+
+        # Patient header: name in B, DOB in G, NHS number in H, provider in M.
+        if (col1 and parse_excel_datetime(col6, workbook.datemode)
+                and normalise_nhs_number(row[7])):
+            current_patient = col1
+            current_nhs = normalise_nhs_number(row[7])
+            current_provider = clean(row[12])
+            current_regimen = ""
+            pending_comments = []
             continue
-        output.append(
-            ScheduleRow(
-                institution=clean(row[0]),
-                nhs_number=normalise_nhs_number(row[1]),
-                patient=clean(row[4]),
-                event_dt=event_datetime,
-                start_dt=start_datetime,
-                end_dt=parse_excel_datetime(row[8], workbook.datemode)
-                or start_datetime,
-                event=clean(row[9]).lstrip("*"),
-                visit_provider=clean(row[11]),
-                comments=clean(row[12]),
+
+        # Regimen/course description is printed in column O before event rows.
+        if current_patient and clean(row[14]) and "cycle" in clean(row[14]).casefold():
+            current_regimen = re.sub(r"\s*Comment:\s*$", "", clean(row[14]), flags=re.I)
+            continue
+
+        event_dt = parse_excel_datetime(col6, workbook.datemode)
+        if current_patient and event_dt and col7:
+            event = col7.lstrip("*").strip()
+            comment = clean(row[17])
+            output.append(ScheduleRow(
+                nhs_number=current_nhs,
+                patient=current_patient,
+                event_dt=event_dt,
+                event=clean(" | ".join(x for x in (current_regimen, event) if x)),
+                visit_provider=current_provider,
+                location=clean(row[11]),
+                comments=comment,
                 source_row=row_index + 1,
-            )
-        )
+            ))
+            pending_comments = []
+            continue
+
+        # Standalone text after an event is commonly an event comment. Attach it
+        # to the most recent row for this patient without changing the match key.
+        text_values = [clean(v) for v in row if clean(v)]
+        if current_patient and output and text_values and not col1:
+            text = " | ".join(text_values)
+            if (not text.startswith("Sep ") and "Report Name:" not in text
+                    and "End of Report" not in text and len(text) < 250):
+                last = output[-1]
+                if last.patient == current_patient and not last.comments:
+                    output[-1] = ScheduleRow(
+                        last.nhs_number, last.patient, last.event_dt, last.event,
+                        last.visit_provider, last.location, text, last.source_row)
+
     if not output:
-        raise ValueError(f"No schedule records were found in {path.name}")
+        raise ValueError(f"No schedule event records found in {path.name}")
     return output
 
-
-# ---------------------------------------------------------------------------
-# Pharmacy Requirements XLS parser
-# ---------------------------------------------------------------------------
 
 def parse_pharmacy_requirements(path: Path) -> list[PharmacyRequirement]:
     workbook = xlrd.open_workbook(path)
     sheet = workbook.sheet_by_index(0)
-    sample = " ".join(
-        clean(sheet.cell_value(row_index, column_index))
-        for row_index in range(min(10, sheet.nrows))
-        for column_index in range(sheet.ncols)
-    )
+    sample = " ".join(clean(sheet.cell_value(r, c))
+                      for r in range(min(10, sheet.nrows))
+                      for c in range(sheet.ncols))
     if PHARMACY_REPORT_TITLE.casefold() not in sample.casefold():
-        raise ValueError(
-            f"The supplied XLS is not the expected Pharmacy Requirements report: {path.name}"
-        )
+        raise ValueError(f"Unexpected Pharmacy Requirements report: {path.name}")
     output = []
     for row_index in range(sheet.nrows):
         row = sheet.row_values(row_index) + [""] * 11
-        agent = clean(row[0])
-        amount = row[1]
-        unit = clean(row[2])
-        patient = clean(row[4])
-        physician = clean(row[6])
+        agent, patient = clean(row[0]), clean(row[4])
         administration_date = parse_text_date(row[7])
-        dispensed = clean(row[9])
-        verified = clean(row[10])
         if not (agent and patient and administration_date):
             continue
-        if agent.casefold().startswith("total "):
+        if agent.casefold().startswith("total ") or "oncology day unit" in agent.casefold():
             continue
-        if "oncology day unit" in agent.casefold():
-            continue
-        output.append(
-            PharmacyRequirement(
-                administration_date=administration_date,
-                agent=agent,
-                dose=format_dose(amount, unit),
-                patient=patient,
-                physician=physician,
-                dispensed=dispensed,
-                verified=verified,
-                source_row=row_index + 1,
-            )
-        )
+        output.append(PharmacyRequirement(
+            administration_date, agent, format_dose(row[1], row[2]), patient,
+            clean(row[6]), clean(row[9]), clean(row[10]), row_index + 1,
+        ))
     if not output:
-        raise ValueError(f"No medication records were found in {path.name}")
-
-    # Collapse exact duplicate report lines while preserving different doses.
-    seen = set()
-    distinct = []
-    for medication in output:
-        duplicate_key = (
-            medication.administration_date,
-            patient_match_key(medication.patient),
-            normalise(medication.agent),
-            normalise(medication.dose),
-            normalise(medication.physician),
-        )
-        if duplicate_key in seen:
-            continue
-        seen.add(duplicate_key)
-        distinct.append(medication)
+        raise ValueError(f"No medication records found in {path.name}")
+    seen, distinct = set(), []
+    for item in output:
+        key = (item.administration_date, patient_match_key(item.patient),
+               normalise(item.agent), normalise(item.dose), normalise(item.physician))
+        if key not in seen:
+            seen.add(key)
+            distinct.append(item)
     return distinct
 
-
-# ---------------------------------------------------------------------------
-# Patient Medications PDF parser
-# ---------------------------------------------------------------------------
 
 def likely_pdf_agent_start(line: str) -> tuple[str, str] | None:
     if not line.strip() or PDF_ADMIN_RE.match(line) or PDF_FOOTER_RE.match(line):
         return None
     match = re.match(
         r"^\s*(?P<agent>[A-Za-z0-9][A-Za-z0-9 /&().,'+\-]{1,70}?)"
-        r"\s{2,}(?P<course>.+?)\s*$",
-        line,
+        r"\s{2,}(?P<course>.+?)\s*$", line,
     )
     if not match:
         return None
@@ -470,450 +357,287 @@ def likely_pdf_agent_start(line: str) -> tuple[str, str] | None:
     course = PDF_DATE_AT_END_RE.sub("", clean(match.group("course")))
     if agent.casefold() in {"active", "agent", "nhs number", "allergies"}:
         return None
-    if not re.search(
-        r"\b(mg|mcg|g|mmol|mL|IU|Units|dose\(s\)|tablet|capsule|"
-        r"injection|infusion|prescribed:)\b",
-        course,
-        re.I,
-    ):
+    if not re.search(r"\b(mg|mcg|g|mmol|mL|IU|Units|dose\(s\)|tablet|capsule|"
+                     r"injection|infusion|prescribed:)\b", course, re.I):
         return None
     return agent, course
 
 
-def parse_pdf(path: Path, included_sections: set[str]) -> list[PdfMedication]:
+def parse_pdf(path: Path) -> tuple[list[PdfPatient], list[PdfMedication]]:
+    """Return every patient found plus any Chemo lines that can be parsed."""
     reader = PdfReader(str(path))
     if not reader.pages:
-        raise ValueError("The PDF contains no pages")
-    first_page_text = (
-        reader.pages[0].extract_text(extraction_mode="layout") or ""
-    )
-    if PDF_REPORT_TITLE.casefold() not in first_page_text.casefold():
-        raise ValueError(
-            f"The PDF is not the expected Patient Medications report: {path.name}"
-        )
+        raise ValueError("The Patient Medications PDF contains no pages")
+    first = reader.pages[0].extract_text(extraction_mode="layout") or ""
+    if PDF_REPORT_TITLE.casefold() not in first.casefold():
+        raise ValueError(f"Unexpected Patient Medications report: {path.name}")
 
-    output = []
+    patients, medications = [], []
     for page_number, page in enumerate(reader.pages, start=1):
         text = page.extract_text(extraction_mode="layout") or ""
-        patient_match = PDF_PATIENT_RE.search(text)
-        if not patient_match:
+        match = PDF_PATIENT_RE.search(text)
+        if not match:
             continue
-        visit_date = datetime.strptime(
-            patient_match.group("date"), "%b %d, %Y"
-        ).date()
-        visit_time_value = datetime.strptime(
-            patient_match.group("time"), "%H:%M"
-        ).time()
-        patient = clean(patient_match.group("patient"))
-        patient_nhs = normalise_nhs_number(patient_match.group("nhs"))
-        current_section = ""
-        current_medication = None
+        visit_date = datetime.strptime(match.group("date"), "%b %d, %Y").date()
+        visit_time = datetime.combine(
+            visit_date, datetime.strptime(match.group("time"), "%H:%M").time())
+        patient = clean(match.group("patient"))
+        nhs = normalise_nhs_number(match.group("nhs"))
+        patients.append(PdfPatient(visit_date, visit_time, nhs, patient, page_number))
 
-        def emit_medication() -> None:
-            nonlocal current_medication
-            if (
-                current_medication
-                and normalise(current_medication["section"]) in included_sections
-            ):
-                description = clean(
-                    " ".join(current_medication["course_parts"])
-                )
-                output.append(
-                    PdfMedication(
-                        visit_date=visit_date,
-                        visit_time=datetime.combine(visit_date, visit_time_value),
-                        nhs_number=patient_nhs,
-                        patient=patient,
-                        section=current_medication["section"],
-                        agent=current_medication["agent"],
-                        course_description=description,
-                        dose=extract_pdf_dose(description),
-                        route=extract_route(description),
-                        page=page_number,
-                    )
-                )
-            current_medication = None
+        current_section = ""
+        current = None
+
+        def emit() -> None:
+            nonlocal current
+            if current and normalise(current["section"]) == "chemo":
+                description = clean(" ".join(current["parts"]))
+                medications.append(PdfMedication(
+                    visit_date, visit_time, nhs, patient, current["section"],
+                    current["agent"], description, extract_pdf_dose(description),
+                    extract_route(description), page_number,
+                ))
+            current = None
 
         for raw_line in text.splitlines():
-            line = raw_line.rstrip()
-            stripped = clean(line)
+            line, stripped = raw_line.rstrip(), clean(raw_line)
             section_match = PDF_SECTION_RE.match(stripped)
             if section_match:
-                emit_medication()
+                emit()
                 current_section = section_match.group(1)
                 continue
             if PDF_FOOTER_RE.match(stripped):
-                emit_medication()
+                emit()
                 break
             if PDF_ADMIN_RE.match(stripped):
-                emit_medication()
+                emit()
                 continue
-            medication_start = likely_pdf_agent_start(line)
-            if medication_start:
-                emit_medication()
-                current_medication = {
-                    "section": current_section,
-                    "agent": medication_start[0],
-                    "course_parts": [medication_start[1]],
-                }
-            elif current_medication and stripped:
-                continuation = PDF_DATE_AT_END_RE.sub("", stripped)
-                current_medication["course_parts"].append(continuation)
-        emit_medication()
+            start = likely_pdf_agent_start(line)
+            if start:
+                emit()
+                current = {"section": current_section, "agent": start[0], "parts": [start[1]]}
+            elif current and stripped:
+                current["parts"].append(PDF_DATE_AT_END_RE.sub("", stripped))
+        emit()
 
-    seen = set()
-    distinct = []
-    for medication in output:
-        duplicate_key = (
-            medication.visit_date,
-            medication.nhs_number,
-            normalise(medication.section),
-            normalise(medication.agent),
-            normalise(medication.course_description),
-        )
-        if duplicate_key in seen:
-            continue
-        seen.add(duplicate_key)
-        distinct.append(medication)
-    return distinct
+    patient_seen, distinct_patients = set(), []
+    for item in patients:
+        key = (item.visit_date, item.nhs_number)
+        if key not in patient_seen:
+            patient_seen.add(key)
+            distinct_patients.append(item)
+    med_seen, distinct_meds = set(), []
+    for item in medications:
+        key = (item.visit_date, item.nhs_number, normalise(item.agent),
+               normalise(item.course_description))
+        if key not in med_seen:
+            med_seen.add(key)
+            distinct_meds.append(item)
+    return distinct_patients, distinct_meds
 
 
-# ---------------------------------------------------------------------------
-# Matching and workbook formatting
-# ---------------------------------------------------------------------------
-
-def get_schedule_context(appointments: list[ScheduleRow]) -> tuple:
-    ordered = sorted(appointments, key=lambda item: item.start_dt)
-    appointment_time = min(
-        (item.start_dt.time() for item in ordered), default=None
+def schedule_context(appointments: list[ScheduleRow]) -> tuple:
+    ordered = sorted(appointments, key=lambda x: x.event_dt)
+    return (
+        ordered[0].event_dt.time(),
+        " | ".join(dict.fromkeys(x.event for x in ordered if x.event)),
+        " | ".join(dict.fromkeys(x.visit_provider for x in ordered if x.visit_provider)),
     )
-    events = " | ".join(
-        dict.fromkeys(item.event for item in ordered if item.event)
-    )
-    visit_providers = " | ".join(
-        dict.fromkeys(
-            item.visit_provider for item in ordered if item.visit_provider
-        )
-    )
-    comments = " | ".join(
-        dict.fromkeys(item.comments for item in ordered if item.comments)
-    )
-    return appointment_time, events, visit_providers, comments
 
 
-def add_table(worksheet, table_name: str) -> None:
-    if worksheet.max_row < 2:
+def output_row(administration_date, appointment_time, patient_id, patient,
+               physician, provider, events, drug, dose, route, dispensed,
+               verified, source, reference, status) -> list:
+    return [administration_date, appointment_time, patient_id, patient, physician,
+            provider, events, drug, dose, route, dispensed, verified, source,
+            reference, status]
+
+
+def add_table(ws, name: str) -> None:
+    if ws.max_row < 2:
         return
-    reference = f"A1:{worksheet.cell(worksheet.max_row, worksheet.max_column).coordinate}"
-    table = Table(displayName=table_name, ref=reference)
-    table.tableStyleInfo = TableStyleInfo(
-        name="TableStyleMedium2", showRowStripes=True
-    )
-    worksheet.add_table(table)
+    ref = f"A1:{ws.cell(ws.max_row, ws.max_column).coordinate}"
+    table = Table(displayName=name, ref=ref)
+    table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=True)
+    ws.add_table(table)
 
 
-def style_worksheet(worksheet) -> None:
-    worksheet.freeze_panes = "A2"
-    worksheet.sheet_view.showGridLines = False
-    for cell in worksheet[1]:
+def style_output_sheet(ws) -> None:
+    ws.freeze_panes = "A2"
+    ws.sheet_view.showGridLines = False
+    for cell in ws[1]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="1F4E78")
         cell.alignment = Alignment(wrap_text=True, vertical="center")
-    worksheet.row_dimensions[1].height = 32
-    for row in worksheet.iter_rows(min_row=2):
+    ws.row_dimensions[1].height = 32
+    widths = {"A": 18, "B": 14, "C": 15, "D": 31, "E": 35, "F": 35,
+              "G": 48, "H": 38, "I": 22, "J": 18, "K": 12, "L": 12,
+              "M": 26, "N": 18, "O": 56}
+    for col, width in widths.items():
+        ws.column_dimensions[col].width = width
+    for row in ws.iter_rows(min_row=2):
         for cell in row:
             cell.alignment = Alignment(wrap_text=True, vertical="top")
-    widths = {
-        "A": 18,
-        "B": 14,
-        "C": 15,
-        "D": 31,
-        "E": 35,
-        "F": 35,
-        "G": 42,
-        "H": 38,
-        "I": 22,
-        "J": 18,
-        "K": 12,
-        "L": 12,
-        "M": 24,
-        "N": 18,
-        "O": 54,
-    }
-    for column, width in widths.items():
-        worksheet.column_dimensions[column].width = width
-
-
-def write_output_sheet(
-    workbook: Workbook, title: str, rows: list[list], table_name: str
-):
-    worksheet = workbook.create_sheet(title)
-    worksheet.append(OUTPUT_HEADERS)
-    for row in rows:
-        worksheet.append(row)
-    style_worksheet(worksheet)
-    for cell in worksheet["A"][1:]:
+    for cell in ws["A"][1:]:
         cell.number_format = "dd/mm/yyyy"
-    for cell in worksheet["B"][1:]:
+    for cell in ws["B"][1:]:
         cell.number_format = "hh:mm"
-    add_table(worksheet, table_name)
-    return worksheet
 
 
-# ---------------------------------------------------------------------------
-# Main build
-# ---------------------------------------------------------------------------
+def write_output_sheet(wb, title: str, rows: list[list], table_name: str):
+    ws = wb.create_sheet(title)
+    ws.append(OUTPUT_HEADERS)
+    for row in rows:
+        ws.append(row)
+    style_output_sheet(ws)
+    add_table(ws, table_name)
+    return ws
 
-def build_workbook(
-    schedule_path: Path,
-    pharmacy_path: Path,
-    pdf_path: Path,
-    agent_rules_path: Path,
-    event_rules_path: Path,
-    output_path: Path,
-) -> dict:
+
+def build_workbook(schedule_path: Path, pharmacy_path: Path, pdf_path: Path,
+                   output_path: Path) -> dict:
     schedule = parse_schedule(schedule_path)
-    pharmacy_requirements = parse_pharmacy_requirements(pharmacy_path)
-    pdf_medications = parse_pdf(pdf_path, included_sections={"chemo"})
-    agent_rules = load_csv_rules(agent_rules_path)
-    event_rules = load_csv_rules(event_rules_path)
+    pharmacy = parse_pharmacy_requirements(pharmacy_path)
+    pdf_patients, pdf_medications = parse_pdf(pdf_path)
 
-    schedule_dates = {row.event_dt.date() for row in schedule}
-    pharmacy_dates = {
-        row.administration_date for row in pharmacy_requirements
-    }
+    schedule_dates = {x.event_dt.date() for x in schedule}
+    pharmacy_dates = {x.administration_date for x in pharmacy}
+    pdf_dates = {x.visit_date for x in pdf_patients}
     if len(schedule_dates) != 1:
-        raise ValueError("The timed schedule must cover exactly one treatment date")
-    if len(pharmacy_dates) != 1:
-        raise ValueError(
-            "The Pharmacy Requirements report must cover exactly one administration date"
-        )
-    schedule_date = next(iter(schedule_dates))
-    pharmacy_date = next(iter(pharmacy_dates))
-    if schedule_date != pharmacy_date:
-        raise ValueError(
-            f"The report dates do not match. Schedule: {schedule_date}; "
-            f"Pharmacy Requirements: {pharmacy_date}"
-        )
-    administration_date = schedule_date
+        raise ValueError("The schedule must cover exactly one administration date")
+    administration_date = next(iter(schedule_dates))
+    if pharmacy_dates != {administration_date}:
+        raise ValueError(f"Pharmacy Requirements date(s) {sorted(pharmacy_dates)} do not match {administration_date}")
+    if pdf_dates and pdf_dates != {administration_date}:
+        raise ValueError(f"Patient Medications date(s) {sorted(pdf_dates)} do not match {administration_date}")
 
-    schedule_by_name = defaultdict(list)
-    schedule_by_nhs = defaultdict(list)
-    for row in schedule:
-        schedule_by_name[
-            (row.event_dt.date(), patient_match_key(row.patient))
-        ].append(row)
-        schedule_by_nhs[(row.event_dt.date(), row.nhs_number)].append(row)
+    schedule_by_nhs, schedule_by_name = defaultdict(list), defaultdict(list)
+    for item in schedule:
+        schedule_by_nhs[(item.event_dt.date(), item.nhs_number)].append(item)
+        schedule_by_name[(item.event_dt.date(), patient_match_key(item.patient))].append(item)
 
-    pharmacy_order = []
-    pharmacy_review = []
-    not_scheduled = []
-    included_schedule_keys = set()
+    pharmacy_by_name = defaultdict(list)
+    for item in pharmacy:
+        pharmacy_by_name[(item.administration_date, patient_match_key(item.patient))].append(item)
+    pdf_patients_by_key = {(x.visit_date, x.nhs_number): x for x in pdf_patients}
+    pdf_meds_by_key = defaultdict(list)
+    for item in pdf_medications:
+        pdf_meds_by_key[(item.visit_date, item.nhs_number)].append(item)
 
-    for medication in pharmacy_requirements:
-        decision, rule_note = get_agent_decision(
-            medication.agent, agent_rules
-        )
-        appointments = schedule_by_name.get(
-            (
-                medication.administration_date,
-                patient_match_key(medication.patient),
-            ),
-            [],
-        )
-        appointment_time, events, visit_providers, comments = (
-            get_schedule_context(appointments)
-        )
-        patient_id = appointments[0].nhs_number if appointments else ""
-        status_reasons = []
-        if not appointments:
-            status_reasons.append(
-                "No matching timed schedule record by administration date, surname and first forename"
-            )
-        if decision == "REVIEW":
-            status_reasons.append(rule_note)
-        if not medication.dose:
-            status_reasons.append("Dose is missing")
-        if medication.dispensed:
-            status_reasons.append(
-                f"Dispensed indicator: {medication.dispensed}"
-            )
-        if medication.verified:
-            status_reasons.append(
-                f"Verified indicator: {medication.verified}"
-            )
-        status = "; ".join(status_reasons) if status_reasons else "Ready"
-        row = [
-            medication.administration_date,
-            appointment_time,
-            patient_id,
-            medication.patient,
-            medication.physician,
-            visit_providers,
-            events,
-            medication.agent,
-            medication.dose,
-            "",
-            medication.dispensed,
-            medication.verified,
-            "Pharmacy Requirements XLS",
-            f"Row {medication.source_row}",
-            status,
-        ]
-        if appointments and decision == "INCLUDE" and medication.dose:
-            pharmacy_order.append(row)
-            for appointment in appointments:
-                included_schedule_keys.add(
-                    (appointment.event_dt.date(), appointment.nhs_number)
-                )
-        elif not appointments and decision == "INCLUDE":
-            not_scheduled.append(row)
-        elif appointments and decision == "REVIEW":
-            pharmacy_review.append(row)
-        # EXCLUDE items are intentionally omitted.
+    pharmacy_list, patient_review, drug_review = [], [], []
 
-    pdf_by_key = defaultdict(list)
-    for medication in pdf_medications:
-        pdf_by_key[(medication.visit_date, medication.nhs_number)].append(
-            medication
-        )
-
-    Not_Approved = []
-    no_candidate = []
-    for schedule_key, appointments in schedule_by_nhs.items():
-        if schedule_key in included_schedule_keys:
+    # Walk the schedule first so Pharmacy List and Patient Review are time ordered.
+    schedule_patient_keys = sorted(
+        schedule_by_nhs,
+        key=lambda k: min(x.event_dt for x in schedule_by_nhs[k]),
+    )
+    for key in schedule_patient_keys:
+        appointments = schedule_by_nhs[key]
+        if key[1].casefold() == "reserved":
             continue
-        if schedule_key[1].casefold() == "reserved":
-            continue
-        appointment_time, events_text, visit_providers, comments = (
-            get_schedule_context(appointments)
-        )
-        events = [
-            appointment.event for appointment in appointments if appointment.event
-        ]
-        pdf_candidates = pdf_by_key.get(schedule_key, [])
-        if not pdf_candidates:
-            no_candidate.append(
-                [
-                    schedule_key[0],
-                    appointment_time,
-                    schedule_key[1],
-                    appointments[0].patient,
-                    "",
-                    visit_providers,
-                    events_text,
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "No medication source",
-                    "",
-                    "Scheduled patient has no included Pharmacy Requirements line and no PDF Chemo candidate",
-                ]
-            )
-            continue
-        for medication in pdf_candidates:
-            event_decision, event_note = get_pdf_event_decision(
-                events, medication, event_rules
-            )
-            if event_decision == "INCLUDE":
-                status = (
-                    "Pharmacy Requirements has no included preparation line; "
-                    f"{event_note}"
-                )
+        appointment_time, events, provider = schedule_context(appointments)
+        patient = appointments[0].patient
+        pharm_lines = pharmacy_by_name.get((key[0], patient_match_key(patient)), [])
+        pdf_patient = pdf_patients_by_key.get(key)
+
+        if pharm_lines:
+            # Preferred source: do not duplicate the same patient from the PDF.
+            for med in pharm_lines:
+                pharmacy_list.append(output_row(
+                    key[0], appointment_time, key[1], patient, med.physician,
+                    provider, events, med.agent, med.dose, "", med.dispensed,
+                    med.verified, "Pharmacy Requirements XLS", f"Row {med.source_row}",
+                    "Approved",
+                ))
+        elif pdf_patient:
+            meds = pdf_meds_by_key.get(key, [])
+            if meds:
+                for med in meds:
+                    reason = "Planned" if med.agent or med.dose else "Planned; drug and dose not parsed"
+                    pharmacy_list.append(output_row(
+                        key[0], appointment_time, key[1], patient, "", provider,
+                        events, med.agent, med.dose, med.route, "", "",
+                        "Patient Medications PDF", f"Page {med.page}", reason,
+                    ))
             else:
-                status = (
-                    "Pharmacy Requirements has no included preparation line; "
-                    f"manual review required; {event_note}"
-                )
-            if not medication.dose:
-                status = (
-                    "Dose could not be parsed from PDF; review the source page"
-                )
-            Not_Approved.append(
-                [
-                    medication.visit_date,
-                    appointment_time,
-                    medication.nhs_number,
-                    medication.patient,
-                    "",
-                    visit_providers,
-                    events_text,
-                    medication.agent,
-                    medication.dose,
-                    medication.route,
-                    "",
-                    "",
-                    "Patient Medications PDF",
-                    f"Page {medication.page}",
-                    status,
-                ]
-            )
+                # Presence in ptmeds is sufficient for Pharmacy List even when
+                # no medication line can be extracted from the page.
+                pharmacy_list.append(output_row(
+                    key[0], appointment_time, key[1], patient, "", provider,
+                    events, "", "", "", "", "", "Patient Medications PDF",
+                    f"Page {pdf_patient.page}", "Planned; drug and dose not parsed",
+                ))
+        else:
+            patient_review.append(output_row(
+                key[0], appointment_time, key[1], patient, "", provider, events,
+                "", "", "", "", "", "Schedule XLS",
+                " | ".join(f"Row {x.source_row}" for x in appointments),
+                "Not found in Pharmacy Requirements or Patient Medications",
+            ))
+
+    # Pharmacy lines not present in the schedule.
+    for med in pharmacy:
+        appointments = schedule_by_name.get(
+            (med.administration_date, patient_match_key(med.patient)), [])
+        if appointments:
+            continue
+        drug_review.append(output_row(
+            med.administration_date, None, "", med.patient, med.physician, "", "",
+            med.agent, med.dose, "", med.dispensed, med.verified,
+            "Pharmacy Requirements XLS", f"Row {med.source_row}",
+            "Approved medication patient not found in schedule",
+        ))
+
+    # PDF patients not present in the schedule. If nothing parsed, retain a blank line.
+    for key, pdf_patient in pdf_patients_by_key.items():
+        if key in schedule_by_nhs:
+            continue
+        meds = pdf_meds_by_key.get(key, [])
+        if meds:
+            for med in meds:
+                drug_review.append(output_row(
+                    med.visit_date, med.visit_time.time(), med.nhs_number, med.patient,
+                    "", "", "", med.agent, med.dose, med.route, "", "",
+                    "Patient Medications PDF", f"Page {med.page}",
+                    "Planned medication patient not found in schedule",
+                ))
+        else:
+            drug_review.append(output_row(
+                pdf_patient.visit_date, pdf_patient.visit_time.time(),
+                pdf_patient.nhs_number, pdf_patient.patient, "", "", "", "", "",
+                "", "", "", "Patient Medications PDF", f"Page {pdf_patient.page}",
+                "Patient not found in schedule; drug and dose not parsed",
+            ))
 
     def sort_key(row):
-        return (
-            row[0],
-            row[1] or datetime.max.time(),
-            clean(row[3]),
-            clean(row[7]),
-        )
-
-    for rows in (
-        pharmacy_order,
-        pharmacy_review,
-        Not_Approved,
-        not_scheduled,
-        no_candidate,
-    ):
+        return (row[0], row[1] or datetime.max.time(), clean(row[3]), clean(row[7]))
+    for rows in (pharmacy_list, patient_review, drug_review):
         rows.sort(key=sort_key)
 
-    workbook = Workbook()
-    workbook.remove(workbook.active)
-    write_output_sheet(
-        workbook, "Pharmacy Order", pharmacy_order, "PharmacyOrder"
-    )
-    write_output_sheet(
-        workbook, "Not Approved", Not_Approved, "NotApproved"
-    )
-    write_output_sheet(
-        workbook,
-        "Pharmacy Report Review",
-        pharmacy_review,
-        "PharmacyReportReview",
-    )
-    write_output_sheet(
-        workbook, "Not Scheduled", not_scheduled, "NotScheduled"
-    )
-    write_output_sheet(
-        workbook,
-        "No Medication Candidate",
-        no_candidate,
-        "NoMedicationCandidate",
-    )
+    wb = Workbook()
+    wb.remove(wb.active)
+    write_output_sheet(wb, "Pharmacy List", pharmacy_list, "PharmacyList")
+    write_output_sheet(wb, "Patient Review", patient_review, "PatientReview")
+    write_output_sheet(wb, "Drug Review", drug_review, "DrugReview")
 
-    summary = workbook.create_sheet("Run Summary")
+    summary = wb.create_sheet("Summary Sheet")
     summary.append(["Item", "Value"])
     summary_rows = [
         ("Generated", datetime.now()),
         ("Administration date", administration_date),
         ("Schedule source", schedule_path.name),
         ("Pharmacy source", pharmacy_path.name),
-        ("PDF source", pdf_path.name),
-        ("Agent rules", agent_rules_path.name),
-        ("Event rules", event_rules_path.name),
-        ("Schedule rows", len(schedule)),
-        ("Distinct Pharmacy Requirements rows", len(pharmacy_requirements)),
-        ("PDF Chemo medication rows", len(pdf_medications)),
-        ("Pharmacy order lines", len(pharmacy_order)),
-        ("Not Approved lines", len(Not_Approved)),
-        ("Pharmacy report-review lines", len(pharmacy_review)),
-        ("Included medication lines not scheduled", len(not_scheduled)),
-        ("Scheduled patients with no candidate", len(no_candidate)),
-        (
-            "Important",
-            "Planning extract only. Verify drug and dose against the current authorised ARIA prescription before preparation, release or administration.",
-        ),
+        ("Patient Medications source", pdf_path.name),
+        ("Schedule event rows", len(schedule)),
+        ("Distinct scheduled patients", len(schedule_patient_keys)),
+        ("Distinct Pharmacy Requirements lines", len(pharmacy)),
+        ("Patient Medications patients", len(pdf_patients)),
+        ("Parsed Patient Medications drug lines", len(pdf_medications)),
+        ("Pharmacy List lines", len(pharmacy_list)),
+        ("Patient Review patients", len(patient_review)),
+        ("Drug Review lines", len(drug_review)),
+        ("Status meaning", "Approved = sourced from Pharmacy Requirements; Planned = sourced from Patient Medications."),
+        ("Important", "Planning extract only. Verify patient, drug and dose against the current authorised ARIA prescription before preparation, release or administration."),
     ]
     for row in summary_rows:
         summary.append(row)
@@ -929,99 +653,48 @@ def build_workbook(
             cell.alignment = Alignment(wrap_text=True, vertical="top")
     summary["B2"].number_format = "dd/mm/yyyy hh:mm"
     summary["B3"].number_format = "dd/mm/yyyy"
-    add_table(summary, "RunSummary")
+    add_table(summary, "SummarySheet")
 
-    workbook.save(output_path)
+    wb.save(output_path)
     return {
         "administration_date": administration_date,
-        "order": len(pharmacy_order),
-        "not_approved": len(Not_Approved),
-        "pharmacy_review": len(pharmacy_review),
-        "not_scheduled": len(not_scheduled),
-        "no_candidate": len(no_candidate),
+        "pharmacy_list": len(pharmacy_list),
+        "patient_review": len(patient_review),
+        "drug_review": len(drug_review),
     }
 
 
-# ---------------------------------------------------------------------------
-# No-parameter operational execution
-# ---------------------------------------------------------------------------
-
 def main() -> int:
     log_path = configure_logging()
-    logging.info("Starting pharmacy advance-preparation process")
+    logging.info("Starting pharmacy planning process")
     try:
         ensure_folders()
         files = validate_required_files()
-        logging.info("Schedule input: %s", files["schedule"])
-        logging.info("Pharmacy input: %s", files["pharmacy"])
-        logging.info("PDF input: %s", files["pdf"])
-
-        schedule_rows = parse_schedule(files["schedule"])
-        treatment_dates = {row.event_dt.date() for row in schedule_rows}
-        if len(treatment_dates) != 1:
-            raise ValueError(
-                "The schedule must cover exactly one administration date"
-            )
-        administration_date = next(iter(treatment_dates))
-        requested_output = OUTPUT_DIR / (
-            f"Pharmacy_Advance_Preparation_{administration_date.isoformat()}.xlsx"
-        )
-        output_path = get_available_path(requested_output)
-        if output_path != requested_output:
-            logging.warning(
-                "The standard output already exists. Creating: %s", output_path
-            )
-
-        statistics = build_workbook(
-            schedule_path=files["schedule"],
-            pharmacy_path=files["pharmacy"],
-            pdf_path=files["pdf"],
-            agent_rules_path=files["agent_rules"],
-            event_rules_path=files["event_rules"],
-            output_path=output_path,
-        )
-        if not output_path.exists():
-            raise RuntimeError(
-                "The build completed but the output workbook was not found"
-            )
-        if output_path.stat().st_size == 0:
-            raise RuntimeError("The generated workbook is empty")
-
-        logging.info("Output created: %s", output_path)
-        logging.info("Pharmacy order lines: %s", statistics["order"])
-        logging.info("Not Approved lines: %s", statistics["not_approved"])
-        logging.info(
-            "Pharmacy report-review lines: %s",
-            statistics["pharmacy_review"],
-        )
-        logging.info("Not-scheduled lines: %s", statistics["not_scheduled"])
-        logging.info("No-candidate patients: %s", statistics["no_candidate"])
-
+        schedule = parse_schedule(files["schedule"])
+        dates = {x.event_dt.date() for x in schedule}
+        if len(dates) != 1:
+            raise ValueError("The schedule must cover exactly one administration date")
+        administration_date = next(iter(dates))
+        requested = OUTPUT_DIR / f"Pharmacy_Advance_Preparation_{administration_date}.xlsx"
+        output_path = get_available_path(requested)
+        stats = build_workbook(files["schedule"], files["pharmacy"], files["pdf"], output_path)
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            raise RuntimeError("The output workbook was not created correctly")
         archive_folder = archive_input_files(
-            input_paths=[
-                files["schedule"],
-                files["pharmacy"],
-                files["pdf"],
-            ],
-            administration_date=administration_date,
-        )
-        logging.info("Inputs archived to: %s", archive_folder)
-
-        print()
-        print("Pharmacy preparation process completed successfully.")
+            [files["schedule"], files["pharmacy"], files["pdf"]], administration_date)
+        logging.info("Pharmacy List lines: %s", stats["pharmacy_list"])
+        logging.info("Patient Review patients: %s", stats["patient_review"])
+        logging.info("Drug Review lines: %s", stats["drug_review"])
+        print("\nPharmacy planning process completed successfully.")
         print(f"Output:  {output_path}")
         print(f"Archive: {archive_folder}")
-        print(f"Log:     {log_path}")
-        print()
+        print(f"Log:     {log_path}\n")
         return 0
-
     except Exception:
-        logging.exception("Pharmacy advance-preparation process failed")
-        print()
-        print("The pharmacy preparation process failed.")
+        logging.exception("Pharmacy planning process failed")
+        print("\nThe pharmacy planning process failed.")
         print("The input files have not been archived.")
-        print(f"Review the log file: {log_path}")
-        print()
+        print(f"Review the log file: {log_path}\n")
         return 1
 
 
