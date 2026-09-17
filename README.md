@@ -2,6 +2,31 @@
 
 This utility builds an Excel planning and reconciliation workbook from ARIA schedule, pharmacy requirements, and patient medication reports. It does not calculate doses and must not replace verification against the current authorised ARIA prescription before preparation, release, or administration.
 
+## Purpose
+Following the failure of the Pharmacy Manufacturing Isolator used to produce SACT for PHU, Oncology havebeen tasked with providing required medications at least four days in advance.
+
+This process generates a pharmacy advance-preparation spreadsheet for treatments scheduled on a specifiedadministration date.
+The workbook combines multiple ARIA reports to identify:
+- scheduled patients;
+- treatment medications;
+- prescribed doses;
+- prescribing clinicians;
+- appointments requiring review.
+
+The objective is to provide pharmacy with advance notice of medicines that may require preparation while also highlighting records that require manual checking before inclusion.
+
+## Daily Run
+To be run daily for the schedule fiur working days in advance:
+
+| Day report run   | Shedule parameters |
+| ---------------- | ------------------ |
+| Monday week n    | Friday week n      |
+| Tuesday week n   | Monday week n+1    |
+| Wednesday week n | Tuesday week n+1   |
+| Thursday week n  | Wednesday week n+1 |
+| Friday week n    | Thursday week n_1  |
+
+
 ## Requirements
 
 - Windows with Python 3.10 or later recommended.
