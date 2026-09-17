@@ -2,7 +2,7 @@
 """Build the four-tab ARIA pharmacy planning workbook.
 
 Source precedence:
-1. sch_inst_by_pt_sum_adel.xls is the authoritative daily schedule.
+1. sch_inst_by_pt_sum_aal.xls is the authoritative daily schedule.
 2. pharm_reqmt.xls is the preferred medication source. Matching lines are Approved.
 3. ptmeds_sch_time.pdf is the fallback medication source. Matching lines are Planned.
 
@@ -32,7 +32,7 @@ OUTPUT_DIR = BASE_DIR / "Output"
 ARCHIVE_DIR = BASE_DIR / "Archive"
 LOG_DIR = BASE_DIR / "Logs"
 
-SCHEDULE_FILENAME = "sch_inst_by_pt_sum_adel.xls"
+SCHEDULE_FILENAME = "sch_inst_by_pt_sum_aal.xls"
 PHARMACY_FILENAME = "pharm_reqmt.xls"
 PDF_FILENAME = "ptmeds_sch_time.pdf"
 
@@ -241,11 +241,11 @@ def archive_input_files(paths: list[Path], administration_date: date) -> Path:
 
 
 def parse_schedule(path: Path) -> list[ScheduleRow]:
-    """Parse the patient-grouped CUSTOM summary report supplied by Pharmacy."""
+    """Parse the current patient-grouped CUSTOM schedule export."""
     workbook = xlrd.open_workbook(path)
     sheet = workbook.sheet_by_index(0)
     sample = " ".join(clean(sheet.cell_value(r, c))
-                      for r in range(min(15, sheet.nrows))
+                      for r in range(min(20, sheet.nrows))
                       for c in range(sheet.ncols))
     if SCHEDULE_REPORT_TITLE.casefold() not in sample.casefold():
         raise ValueError(f"Unexpected schedule report format: {path.name}")
@@ -255,56 +255,54 @@ def parse_schedule(path: Path) -> list[ScheduleRow]:
     current_nhs = ""
     current_provider = ""
     current_regimen = ""
-    pending_comments: list[str] = []
+    current_comment = ""
 
     for row_index in range(sheet.nrows):
         row = sheet.row_values(row_index) + [""] * 20
-        col1, col6, col7 = clean(row[1]), row[6], clean(row[7])
+        patient = clean(row[1])
+        dob = parse_excel_datetime(row[9], workbook.datemode)
+        nhs = normalise_nhs_number(row[10])
 
-        # Patient header: name in B, DOB in G, NHS number in H, provider in M.
-        if (col1 and parse_excel_datetime(col6, workbook.datemode)
-                and normalise_nhs_number(row[7])):
-            current_patient = col1
-            current_nhs = normalise_nhs_number(row[7])
-            current_provider = clean(row[12])
+        if patient and dob and nhs:
+            current_patient = patient
+            current_nhs = nhs
+            current_provider = clean(row[18])
             current_regimen = ""
-            pending_comments = []
+            current_comment = ""
             continue
 
-        # Regimen/course description is printed in column O before event rows.
-        if current_patient and clean(row[14]) and "cycle" in clean(row[14]).casefold():
-            current_regimen = re.sub(r"\s*Comment:\s*$", "", clean(row[14]), flags=re.I)
+        time_value = row[9]
+        event_dt = parse_excel_datetime(time_value, workbook.datemode)
+        event = clean(row[10])
+        time_text = clean(time_value)
+
+        if current_patient and not event_dt and time_text.casefold().startswith("plan "):
+            current_regimen = time_text
+            if clean(row[18]):
+                current_comment = clean(row[18])
             continue
 
-        event_dt = parse_excel_datetime(col6, workbook.datemode)
-        if current_patient and event_dt and col7:
-            event = col7.lstrip("*").strip()
-            comment = clean(row[17])
+        if current_patient and event_dt and event:
             output.append(ScheduleRow(
                 nhs_number=current_nhs,
                 patient=current_patient,
                 event_dt=event_dt,
-                event=clean(" | ".join(x for x in (current_regimen, event) if x)),
+                event=clean(" | ".join(
+                    x for x in (current_regimen, event.lstrip("*").strip()) if x
+                )),
                 visit_provider=current_provider,
-                location=clean(row[11]),
-                comments=comment,
+                location=clean(row[15]),
+                comments=current_comment,
                 source_row=row_index + 1,
             ))
-            pending_comments = []
             continue
 
-        # Standalone text after an event is commonly an event comment. Attach it
-        # to the most recent row for this patient without changing the match key.
-        text_values = [clean(v) for v in row if clean(v)]
-        if current_patient and output and text_values and not col1:
-            text = " | ".join(text_values)
-            if (not text.startswith("Sep ") and "Report Name:" not in text
-                    and "End of Report" not in text and len(text) < 250):
-                last = output[-1]
-                if last.patient == current_patient and not last.comments:
-                    output[-1] = ScheduleRow(
-                        last.nhs_number, last.patient, last.event_dt, last.event,
-                        last.visit_provider, last.location, text, last.source_row)
+        row_comment = clean(row[18])
+        if (current_patient and row_comment
+                and "report name:" not in row_comment.casefold()):
+            current_comment = clean(" | ".join(dict.fromkeys(
+                x for x in (current_comment, row_comment) if x
+            )))
 
     if not output:
         raise ValueError(f"No schedule event records found in {path.name}")
