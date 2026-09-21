@@ -473,6 +473,9 @@ def style_output_sheet(ws) -> None:
               "M": 26, "N": 18, "O": 56}
     for col, width in widths.items():
         ws.column_dimensions[col].width = width
+    # Hide technical / reconciliation columns
+    for col in ("E", "F", "K", "L", "M", "N", "O"):
+        ws.column_dimensions[col].hidden = True
     for row in ws.iter_rows(min_row=2):
         for cell in row:
             cell.alignment = Alignment(wrap_text=True, vertical="top")
