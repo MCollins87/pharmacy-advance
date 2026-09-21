@@ -44,7 +44,7 @@ Place these files in `C:\IDR\PharmacyAdvance\Input` using the exact filenames:
 
 | File | Purpose |
 | --- | --- |
-| `sch_inst_by_pt_sum_adel.xls` | Authoritative daily schedule, including appointment time, NHS number, patient, event, and provider |
+| `sch_inst_by_pt_sum_aal.xls` | Authoritative daily schedule, including appointment time, NHS number, patient, event, and provider |
 | `pharm_reqmt.xls` | Preferred medication source, including agent, dose, physician, dispensed, and verified fields |
 | `ptmeds_sch_time.pdf` | Fallback medication source for scheduled patients without matching Pharmacy Requirements lines |
 
