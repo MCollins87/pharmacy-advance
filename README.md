@@ -96,13 +96,32 @@ Output\Pharmacy_Advance_Preparation_YYYY-MM-DD.xlsx
 
 If that name already exists, a timestamp is appended rather than overwriting it.
 
-The medication and review tabs use these columns:
+The medication and review tabs contain the following fields:
 
-`Administration date`, `Appointment time`, `Patient ID`, `Patient`, `Prescription physician`, `Visit provider`, `Scheduled event(s)`, `Drug`, `Dose`, `Route`, `Dispensed`, `Verified`, `Source`, `Source reference`, and `Status / reason`.
+Administration date, Appointment time, Patient ID, Patient,
+Prescription physician, Visit provider, Scheduled event(s),
+Drug, Dose, Route, Dispensed, Verified, Source,
+Source reference, and Status / reason.
+
+To provide a simplified operational view for Pharmacy users,
+the following reconciliation and troubleshooting columns are
+hidden by default:
+
+- Prescription physician
+- Visit provider
+- Dispensed
+- Verified
+- Source
+- Source reference
+- Status / reason
+
+These columns remain present within the workbook and may be
+unhidden by authorised users for investigation, data-quality
+checks, reconciliation, or troubleshooting purposes.
 
 ### Workbook Tabs
 
-- **Pharmacy List**: approved Pharmacy Requirements lines plus planned PDF fallback lines for scheduled patients.
+- **Pharmacy List**: approved Pharmacy Requirements lines plus planned PDF fallback lines for scheduled patients. Reconciliation fields are hidden by default.
 - **Patient Review**: scheduled patients not found in either medication source.
 - **Drug Review**: approved or planned medication records whose patient is not found in the schedule.
 - **Summary Sheet**: generation details, source filenames, row counts, and the planning-only warning.
