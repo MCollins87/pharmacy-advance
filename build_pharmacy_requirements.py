@@ -37,6 +37,7 @@ DRUG_EXCLUSION_FILE = CONFIG_DIR / "drug_exclusions.csv"
 SCHEDULE_FILENAME = "sch_inst_by_pt_sum_aal.xls"
 PHARMACY_FILENAME = "pharm_reqmt.xls"
 PDF_FILENAME = "ptmeds_sch_time.pdf"
+PATIENT_MEDS_XLS_FILENAME = "ptmeds_sch_time.xls"
 
 SCHEDULE_REPORT_TITLE = "Schedule - Institution by Patient and Time - Summary"
 PHARMACY_REPORT_TITLE = (
@@ -113,6 +114,18 @@ class PdfMedication:
     route: str
     page: int
 
+@dataclass(frozen=True)
+class XlsMedication:
+    visit_date: date | None
+    visit_time: datetime | None
+    nhs_number: str
+    patient: str
+    section: str
+    agent: str
+    course_description: str
+    dose: str
+    route: str
+    source_row: int
 
 def clean(value) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
@@ -217,6 +230,7 @@ def validate_required_files() -> dict[str, Path]:
         "schedule": INPUT_DIR / SCHEDULE_FILENAME,
         "pharmacy": INPUT_DIR / PHARMACY_FILENAME,
         "pdf": INPUT_DIR / PDF_FILENAME,
+        "patient_meds_xls": INPUT_DIR / PATIENT_MEDS_XLS_FILENAME,
     }
     missing = [p for p in files.values() if not p.exists()]
     if missing:
@@ -342,6 +356,89 @@ def parse_pharmacy_requirements(path: Path) -> list[PharmacyRequirement]:
             seen.add(key)
             distinct.append(item)
     return distinct
+
+def parse_patient_medication_xls(path: Path) -> list[XlsMedication]:
+    workbook = xlrd.open_workbook(path)
+    sheet = workbook.sheet_by_index(0)
+    
+    medications = []
+    
+    current_patient = ""
+    current_nhs = ""
+    current_visit_date = None
+    current_visit_time = None
+    current_section = ""
+    patient_re = re.compile(
+        r"^(?P<patient>.+?)\s+NHS Number:\s*(?P<nhs>\d{10})"
+    )
+
+    for row_index in range(sheet.nrows):
+        value = clean(sheet.cell_value(row_index, 0))
+        if not value:
+            continue
+
+        if value.startswith("Start Time"):
+            current_visit_time = value
+            continue
+
+        patient_match = patient_re.match(value)
+
+        if patient_match:
+            current_patient = clean(
+                patient_match.group("patient")
+            )
+            current_nhs = patient_match.group("nhs")
+            current_section = ""
+            continue
+
+        if value in (
+            "Pharmacy:",
+            "Chemo",
+            "Hormone",
+            "Supportive",
+            "Immunotherapy",
+            "Active",
+            "Active As Per Patient",
+        ):
+            current_section = value
+            continue
+
+        if current_section != "Chemo":
+            continue
+        if (
+            value.startswith("Start Time:")
+            or value.startswith("Report Name:")
+            or value.startswith("*** End")
+            or value == "Unknown"
+        ):
+            continue
+# TO Do: 
+# Next Stage:
+# Read following row(s) and populate:
+#   course_description
+#   dose
+#   route
+
+        medications.append(
+            XlsMedication(
+                visit_date=None,
+                visit_time=None,
+                nhs_number=current_nhs,
+                patient=current_patient,
+                section=current_section,
+                agent=value,
+                course_description="",
+                dose="",
+                route="",
+                source_row=row_index + 1,
+            )
+        )
+    logging.info(
+        "Parsed XLS medications: %s",
+        len(medications)
+        )
+
+    return medications
 
 
 def likely_pdf_agent_start(line: str) -> tuple[str, str] | None:
@@ -501,7 +598,9 @@ def build_workbook(schedule_path: Path, pharmacy_path: Path, pdf_path: Path,
                    output_path: Path) -> dict:
     schedule = parse_schedule(schedule_path)
     pharmacy = parse_pharmacy_requirements(pharmacy_path)
+    xls_medications = parse_patient_medication_xls(INPUT_DIR / PATIENT_MEDS_XLS_FILENAME)
     pdf_patients, pdf_medications = parse_pdf(pdf_path)
+    logging.info("Parsed PDF medications: %s", len(pdf_medications))
     excluded_drugs = load_drug_exclusions()
     pharmacy_before = len(pharmacy)
     pharmacy = [
