@@ -60,10 +60,14 @@ C:\IDR\PharmacyAdvance\
 |   `-- ptmeds_sch_time.pdf
 |-- Output\
 |-- Archive\
-`-- Logs\
+|-- Logs\
+`-- Config\drug_exclusions.csv
 ```
 
 The script creates missing folders. It takes no command-line arguments.
+
+Operational exclusuion lookup location:
+`C:\IDR\PharmacyAdvance\Config\drug_exclusions.csv`
 
 ## Run
 

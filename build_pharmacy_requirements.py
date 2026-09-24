@@ -19,7 +19,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-
+import csv
 import xlrd
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -31,7 +31,9 @@ INPUT_DIR = BASE_DIR / "Input"
 OUTPUT_DIR = BASE_DIR / "Output"
 ARCHIVE_DIR = BASE_DIR / "Archive"
 LOG_DIR = BASE_DIR / "Logs"
+CONFIG_DIR = BASE_DIR / "Config"
 
+DRUG_EXCLUSION_FILE = CONFIG_DIR / "drug_exclusions.csv"
 SCHEDULE_FILENAME = "sch_inst_by_pt_sum_aal.xls"
 PHARMACY_FILENAME = "pharm_reqmt.xls"
 PDF_FILENAME = "ptmeds_sch_time.pdf"
@@ -206,7 +208,7 @@ def configure_logging() -> Path:
 
 
 def ensure_folders() -> None:
-    for folder in (INPUT_DIR, OUTPUT_DIR, ARCHIVE_DIR, LOG_DIR):
+    for folder in (INPUT_DIR, OUTPUT_DIR, ARCHIVE_DIR, LOG_DIR, CONFIG_DIR):
         folder.mkdir(parents=True, exist_ok=True)
 
 
@@ -500,6 +502,32 @@ def build_workbook(schedule_path: Path, pharmacy_path: Path, pdf_path: Path,
     schedule = parse_schedule(schedule_path)
     pharmacy = parse_pharmacy_requirements(pharmacy_path)
     pdf_patients, pdf_medications = parse_pdf(pdf_path)
+    excluded_drugs = load_drug_exclusions()
+    pharmacy_before = len(pharmacy)
+    pharmacy = [
+        x
+        for x in pharmacy
+        if normalise(x.agent) not in excluded_drugs
+        ]
+    pharmacy_excluded = pharmacy_before - len(pharmacy)
+
+    pdf_before = len(pdf_medications)
+    pdf_medications = [
+        x
+        for x in pdf_medications
+        if normalise(x.agent) not in excluded_drugs
+        ]
+    pdf_excluded = pdf_before - len(pdf_medications)
+
+    logging.info(
+        "Excluded %s Pharmacy Requirements drugs",
+        pharmacy_excluded,
+        )
+
+    logging.info(
+        "Excluded %s PDF drugs",
+        pdf_excluded,
+    )
 
     schedule_dates = {x.event_dt.date() for x in schedule}
     pharmacy_dates = {x.administration_date for x in pharmacy}
@@ -631,9 +659,11 @@ def build_workbook(schedule_path: Path, pharmacy_path: Path, pdf_path: Path,
         ("Patient Medications source", pdf_path.name),
         ("Schedule event rows", len(schedule)),
         ("Distinct scheduled patients", len(schedule_patient_keys)),
-        ("Distinct Pharmacy Requirements lines", len(pharmacy)),
+        ("Included Pharmacy Requirements lines", len(pharmacy)),
         ("Patient Medications patients", len(pdf_patients)),
         ("Parsed Patient Medications drug lines", len(pdf_medications)),
+        ("Drug exclusions loaded", len(excluded_drugs)),
+        ("Drug lines excluded", pharmacy_excluded + pdf_excluded),
         ("Pharmacy List lines", len(pharmacy_list)),
         ("Patient Review patients", len(patient_review)),
         ("Drug Review lines", len(drug_review)),
@@ -664,6 +694,33 @@ def build_workbook(schedule_path: Path, pharmacy_path: Path, pdf_path: Path,
         "drug_review": len(drug_review),
     }
 
+def load_drug_exclusions() -> set[str]:
+    """
+    Load drug exclusions maintained by Pharmacy.
+    Returns:
+        Set of normalised drug names.
+    """
+    if not DRUG_EXCLUSION_FILE.exists():
+        logging.warning(
+            "Drug exclusion file not found: %s",
+            DRUG_EXCLUSION_FILE,
+        )
+        return set()
+    exclusions = set()
+    with open(DRUG_EXCLUSION_FILE, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row.get("Exclude", "").strip().upper() != "Y":
+                continue
+            drug_name = row.get("DrugName", "")
+            if drug_name:
+                exclusions.add(normalise(drug_name))
+    logging.info(
+        "Loaded %s drug exclusions",
+        len(exclusions),
+    )
+
+    return exclusions
 
 def main() -> int:
     log_path = configure_logging()
