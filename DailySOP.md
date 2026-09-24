@@ -17,13 +17,13 @@ From ARIA MO, run the following reports
 
 ### Save Location
 
-`RHU-D090232\IDR\PharmacyAdvance\Input\`
+`\\RHU-D090232\IDR\PharmacyAdvance\Input\`
 
 ## 2. Run Python Script
 
 To be run on RHU-D090232
 
-``` poweshell
+``` shell
 python C:\git-repos\pharmacy-advance\build_pharmacy_requirements.py
 ```
 
