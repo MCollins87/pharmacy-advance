@@ -15,7 +15,7 @@ import logging
 import re
 import shutil
 import sys
-from collections import defaultdict
+from collections import defaultdict, Counter
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -371,16 +371,33 @@ def parse_patient_medication_xls(path: Path) -> list[XlsMedication]:
     patient_re = re.compile(
         r"^(?P<patient>.+?)\s+NHS Number:\s*(?P<nhs>\d{10})"
     )
+    start_time_re = re.compile(
+        r"Start Time:\s*"
+        r"(?P<date>[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})"
+        r"\s+"
+        r"(?P<time>\d{1,2}:\d{2})"
+    )
 
     for row_index in range(sheet.nrows):
         value = clean(sheet.cell_value(row_index, 0))
         if not value:
             continue
 
-        if value.startswith("Start Time"):
-            current_visit_time = value
+        start_match = start_time_re.search(value)
+        if start_match:
+            current_visit_date = datetime.strptime(
+                start_match.group("date"),
+                "%b %d, %Y"
+            ).date()
+            current_visit_time = datetime.combine(
+                current_visit_date,
+                datetime.strptime(
+                    start_match.group("time"),
+                    "%H:%M"
+                ).time()
+            )
             continue
-
+        
         patient_match = patient_re.match(value)
 
         if patient_match:
@@ -421,8 +438,8 @@ def parse_patient_medication_xls(path: Path) -> list[XlsMedication]:
 
         medications.append(
             XlsMedication(
-                visit_date=None,
-                visit_time=None,
+                visit_date=current_visit_date,
+                visit_time=current_visit_time,
                 nhs_number=current_nhs,
                 patient=current_patient,
                 section=current_section,
