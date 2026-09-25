@@ -613,6 +613,15 @@ def build_workbook(schedule_path: Path, pharmacy_path: Path, pdf_path: Path,
     schedule = parse_schedule(schedule_path)
     pharmacy = parse_pharmacy_requirements(pharmacy_path)
     xls_medications = parse_patient_medication_xls(INPUT_DIR / PATIENT_MEDS_XLS_FILENAME)
+    xls_meds_by_key = defaultdict(list)
+    for item in xls_medications:
+        xls_meds_by_key[
+            (item.visit_date, item.nhs_number)
+        ].append(item)
+    logging.info(
+        "Built XLS medication keys: %s",
+        len(xls_meds_by_key)
+    )
     pdf_patients, pdf_medications = parse_pdf(pdf_path)
     logging.info("Parsed PDF medications: %s", len(pdf_medications))
     excluded_drugs = load_drug_exclusions()
