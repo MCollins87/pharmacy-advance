@@ -717,16 +717,7 @@ def build_workbook(schedule_path: Path, pharmacy_path: Path, pdf_path: Path,
         patient = appointments[0].patient
         pharm_lines = pharmacy_by_name.get((key[0], patient_match_key(patient)), [])
         pdf_patient = pdf_patients_by_key.get(key)
-        xls_meds = xls_meds_by_key.get(key, [])
-        pdf_meds = pdf_meds_by_key.get(key, [])
-        if len(xls_meds) != len(pdf_meds):
-            logging.warning(
-                "Medication missmatch NHS=%s XLS=%s PDF=%s",
-                key[1],
-                len(xls_meds),
-                len(pdf_meds)
-            )
-
+        
         if pharm_lines:
             # Preferred source: do not duplicate the same patient from the PDF.
             for med in pharm_lines:
@@ -737,22 +728,32 @@ def build_workbook(schedule_path: Path, pharmacy_path: Path, pdf_path: Path,
                     "Approved",
                 ))
         elif pdf_patient:
-            meds = pdf_meds_by_key.get(key, [])
+            meds = xls_meds_by_key.get(key, [])
             if meds:
                 for med in meds:
                     reason = "Planned" if med.agent or med.dose else "Planned; drug and dose not parsed"
                     pharmacy_list.append(output_row(
                         key[0], appointment_time, key[1], patient, "", provider,
                         events, med.agent, med.dose, med.route, "", "",
-                        "Patient Medications PDF", f"Page {med.page}", reason,
+                        "Patient Medications XLS", f"Row {med.source_row}", reason,
                     ))
             else:
-                # Presence in ptmeds is sufficient for Pharmacy List even when
-                # no medication line can be extracted from the page.
                 pharmacy_list.append(output_row(
-                    key[0], appointment_time, key[1], patient, "", provider,
-                    events, "", "", "", "", "", "Patient Medications PDF",
-                    f"Page {pdf_patient.page}", "Planned; drug and dose not parsed",
+                    key[0],
+                    appointment_time,
+                    key[1],
+                    patient,
+                    "",
+                    provider,
+                    events,
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "Patient Medications XLS",
+                    "",
+                    "Planned; medication not found in XLS",
                 ))
         else:
             patient_review.append(output_row(
@@ -897,7 +898,7 @@ def main() -> int:
         if not output_path.exists() or output_path.stat().st_size == 0:
             raise RuntimeError("The output workbook was not created correctly")
         archive_folder = archive_input_files(
-            [files["schedule"], files["pharmacy"], files["pdf"]], administration_date)
+            [files["schedule"], files["pharmacy"], files["pdf"], files["patient_meds_xls"]], administration_date)
         logging.info("Pharmacy List lines: %s", stats["pharmacy_list"])
         logging.info("Patient Review patients: %s", stats["patient_review"])
         logging.info("Drug Review lines: %s", stats["drug_review"])
