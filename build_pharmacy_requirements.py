@@ -429,13 +429,10 @@ def parse_patient_medication_xls(path: Path) -> list[XlsMedication]:
             or value == "Unknown"
         ):
             continue
-# TO Do: 
-# Next Stage:
-# Read following row(s) and populate:
-#   course_description
-#   dose
-#   route
-
+      
+        course_description = clean(
+            sheet.cell_value(row_index, 7)
+        )
         medications.append(
             XlsMedication(
                 visit_date=current_visit_date,
@@ -444,9 +441,9 @@ def parse_patient_medication_xls(path: Path) -> list[XlsMedication]:
                 patient=current_patient,
                 section=current_section,
                 agent=value,
-                course_description="",
-                dose="",
-                route="",
+                course_description=course_description,
+                dose=extract_pdf_dose(course_description),
+                route=extract_route(course_description),
                 source_row=row_index + 1,
             )
         )
