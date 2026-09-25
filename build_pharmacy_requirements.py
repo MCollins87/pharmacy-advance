@@ -15,7 +15,7 @@ import logging
 import re
 import shutil
 import sys
-from collections import defaultdict, Counter
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -613,33 +613,60 @@ def build_workbook(schedule_path: Path, pharmacy_path: Path, pdf_path: Path,
     schedule = parse_schedule(schedule_path)
     pharmacy = parse_pharmacy_requirements(pharmacy_path)
     xls_medications = parse_patient_medication_xls(INPUT_DIR / PATIENT_MEDS_XLS_FILENAME)
+    pdf_patients, pdf_medications = parse_pdf(pdf_path)
+    logging.info(
+        "Parsed PDF medications: %s",
+        len(pdf_medications)
+    )
+    excluded_drugs = load_drug_exclusions()
+    #
+    # XLS exclusions
+    #
+    xls_before = len(xls_medications)
+    xls_medications = [
+        x
+        for x in xls_medications
+        if normalise(x.agent) not in excluded_drugs
+    ]
+    xls_excluded = xls_before - len(xls_medications)
+    logging.info(
+        "Excluded %s XLS drugs",
+        xls_excluded,
+    )
+    #
+    # Build XLS lookup AFTER exclusions
+    #
     xls_meds_by_key = defaultdict(list)
     for item in xls_medications:
         xls_meds_by_key[
             (item.visit_date, item.nhs_number)
         ].append(item)
+
     logging.info(
         "Built XLS medication keys: %s",
         len(xls_meds_by_key)
     )
-    pdf_patients, pdf_medications = parse_pdf(pdf_path)
-    logging.info("Parsed PDF medications: %s", len(pdf_medications))
-    excluded_drugs = load_drug_exclusions()
+    #
+    # Pharmacy exclusions
+    #
     pharmacy_before = len(pharmacy)
     pharmacy = [
         x
         for x in pharmacy
         if normalise(x.agent) not in excluded_drugs
-        ]
+    ]
     pharmacy_excluded = pharmacy_before - len(pharmacy)
-
+    #
+    # PDF exclusions
+    #
     pdf_before = len(pdf_medications)
     pdf_medications = [
         x
         for x in pdf_medications
         if normalise(x.agent) not in excluded_drugs
-        ]
+    ]
     pdf_excluded = pdf_before - len(pdf_medications)
+   
 
     logging.info(
         "Excluded %s Pharmacy Requirements drugs",
@@ -690,6 +717,15 @@ def build_workbook(schedule_path: Path, pharmacy_path: Path, pdf_path: Path,
         patient = appointments[0].patient
         pharm_lines = pharmacy_by_name.get((key[0], patient_match_key(patient)), [])
         pdf_patient = pdf_patients_by_key.get(key)
+        xls_meds = xls_meds_by_key.get(key, [])
+        pdf_meds = pdf_meds_by_key.get(key, [])
+        if len(xls_meds) != len(pdf_meds):
+            logging.warning(
+                "Medication missmatch NHS=%s XLS=%s PDF=%s",
+                key[1],
+                len(xls_meds),
+                len(pdf_meds)
+            )
 
         if pharm_lines:
             # Preferred source: do not duplicate the same patient from the PDF.
