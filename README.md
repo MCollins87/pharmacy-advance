@@ -24,7 +24,7 @@ To be run daily for the schedule fiur working days in advance:
 | Tuesday week n   | Monday week n+1    |
 | Wednesday week n | Tuesday week n+1   |
 | Thursday week n  | Wednesday week n+1 |
-| Friday week n    | Thursday week n_1  |
+| Friday week n    | Thursday week n+1  |
 
 
 ## Requirements
