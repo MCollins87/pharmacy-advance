@@ -8,7 +8,7 @@ From ARIA MO, run the following reports
 | --- | --- | --- |
 | `sch_inst_by_pt_sum_aal` | CHOC & Today + 4 Working Days | `.xls` |
 | `pharm_reqmt` | CHOC & Today + 4 Working Days | `.xls` |
-| `ptmeds_sch_time` | CHOC & Today + 4 Working Days | `.pdf` |
+| `ptmeds_sch_time` | CHOC & Today + 4 Working Days | `.xls` |
 
 ### Export Settings
 

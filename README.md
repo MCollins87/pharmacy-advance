@@ -33,7 +33,7 @@ To be run daily for the schedule fiur working days in advance:
 - Python packages:
 
 ```powershell
-python -m pip install xlrd openpyxl pypdf
+python -m pip install xlrd openpyxl
 ```
 
 The script uses the fixed base directory `C:\IDR\PharmacyAdvance`. Change `BASE_DIR` near the top of `build_pharmacy_requirements.py` if the working directory is different.
@@ -46,10 +46,9 @@ Place these files in `C:\IDR\PharmacyAdvance\Input` using the exact filenames:
 | --- | --- |
 | `sch_inst_by_pt_sum_aal.xls` | Authoritative daily schedule, including appointment time, NHS number, patient, event, and provider |
 | `pharm_reqmt.xls` | Preferred medication source, including agent, dose, physician, dispensed, and verified fields |
-| `ptmeds_sch_time.pdf` | Fallback medication source for scheduled patients without matching Pharmacy Requirements lines |
+| `ptmeds_sch_time.xls` | Fallback medication source for scheduled patients without matching Pharmacy Requirements lines |
 
-The report titles are validated before parsing. The schedule and Pharmacy Requirements report must each contain exactly one administration date, and those dates must match. The PDF date must also match when patient records are present.
-
+The report titles are validated before parsing. The schedule and Pharmacy Requirements report must each contain exactly one administration date, and those dates must match. The schedule, Pharmacy Requirements and Patient Medications reports must contain matching administration dates.
 ## Directory Layout
 
 ```text
@@ -57,7 +56,7 @@ C:\IDR\PharmacyAdvance\
 |-- Input\
 |   |-- sch_inst_by_pt_sum_adel.xls
 |   |-- pharm_reqmt.xls
-|   `-- ptmeds_sch_time.pdf
+|   `-- ptmeds_sch_time.xls
 |-- Output\
 |-- Archive\
 |-- Logs\
@@ -71,7 +70,7 @@ Operational exclusuion lookup location:
 
 ## Run
 
-1. Export the three reports from ARIA for one administration date.
+1. Export the three XLS reports from ARIA for one administration date.
 2. Save them in `Input` with the exact filenames above.
 3. From `C:\IDR\PharmacyAdvance`, run:
 
@@ -85,10 +84,16 @@ On success, the script prints the workbook, archive folder, and log paths. On fa
 
 1. The schedule is the authoritative list of appointments.
 2. Matching Pharmacy Requirements lines are included as `Approved`.
-3. For scheduled patients without matching Pharmacy Requirements lines, parsed chemotherapy lines from the Patient Medications PDF are included as `Planned`.
+3. For scheduled patients without matching Pharmacy Requirements lines, parsed chemotherapy lines from the Patient Medications XLS records are included as `Planned`.
 4. Patients or medication records that cannot be reconciled are placed in a review tab.
 
-Patient matching uses the NHS number for schedule/PDF reconciliation and a normalised surname plus first-forename key for Pharmacy Requirements reconciliation. Exact duplicate medication lines are removed.
+Patient reconciliation uses NHS number matching.
+ 
+Pharmacy Requirements reconciliation uses a normalised surname and first-forename key.
+ 
+Medication records from the Patient Medications report are parsed from the Chemo section of the XLS export.
+ 
+Exact duplicate medication lines are removed.
 
 ## Output Workbook
 
@@ -125,8 +130,8 @@ checks, reconciliation, or troubleshooting purposes.
 
 ### Workbook Tabs
 
-- **Pharmacy List**: approved Pharmacy Requirements lines plus planned PDF fallback lines for scheduled patients. Reconciliation fields are hidden by default.
-- **Patient Review**: scheduled patients not found in either medication source.
+- **Pharmacy List**: approved Pharmacy Requirements lines plus planned Patient Medication XLS lines for scheduled patients. Reconciliation fields are hidden by default.
+- **Patient Review**: scheduled patients not found in Pharmacy Requirements or Patient Medications XLS.
 - **Drug Review**: approved or planned medication records whose patient is not found in the schedule.
 - **Summary Sheet**: generation details, source filenames, row counts, and the planning-only warning.
 
@@ -154,5 +159,5 @@ Before pharmacy preparation, manually confirm:
 
 - administration date, patient identity, appointment time, and event;
 - drug, dose, route, prescribing physician, dispensed, and verified fields;
-- every planned PDF fallback line and every row in both review tabs;
+- every planned Patient Medications XLS line and every row in both review tabs;
 - all records against the current authorised ARIA prescription.
