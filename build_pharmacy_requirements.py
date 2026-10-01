@@ -4,7 +4,7 @@
 Source precedence:
 1. sch_inst_by_pt_sum_aal.xls is the authoritative daily schedule.
 2. pharm_reqmt.xls is the preferred medication source. Matching lines are Approved.
-3. ptmeds_sch_time.pdf is the fallback medication source. Matching lines are Planned.
+3. ptmeds_sch_time.xls is the planned medication source. Matching lines are Planned.
 
 The output is a planning/reconciliation aid. It does not calculate doses and it
 must not replace verification against the current authorised ARIA prescription.
@@ -24,7 +24,6 @@ import xlrd
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.table import Table, TableStyleInfo
-from pypdf import PdfReader
 
 BASE_DIR = Path(r"C:\IDR\PharmacyAdvance")
 INPUT_DIR = BASE_DIR / "Input"
@@ -42,7 +41,6 @@ SCHEDULE_REPORT_TITLE = "Schedule - Institution by Patient and Time - Summary"
 PHARMACY_REPORT_TITLE = (
     "Pharmacy Requirements - by Agent, Rx Type, Administration Date and Patient"
 )
-PDF_REPORT_TITLE = "Patient Medications - Patients Scheduled to Visit - by Time"
 
 OUTPUT_HEADERS = [
     "Administration date", "Appointment time", "Patient ID", "Patient",
@@ -50,21 +48,6 @@ OUTPUT_HEADERS = [
     "Drug", "Dose", "Route", "Dispensed", "Verified", "Source",
     "Source reference", "Status / reason",
 ]
-
-PDF_PATIENT_RE = re.compile(
-    r"Start Time:\s*(?P<date>[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})\s+"
-    r"(?P<time>\d{1,2}:\d{2})\s+Event Provider:.*?\n"
-    r"(?P<patient>.+?)\s+NHS Number:\s*(?P<nhs>\d{10})\b", re.S,
-)
-PDF_SECTION_RE = re.compile(
-    r"^(Chemo|Hormone|Immunotherapy|Supportive|Pharmacy:)\s*$", re.I
-)
-PDF_FOOTER_RE = re.compile(r"^Report Name:", re.I)
-PDF_ADMIN_RE = re.compile(r"^\s*Administration Instructions:", re.I)
-PDF_DATE_AT_END_RE = re.compile(
-    r"\s+[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4}"
-    r"(?:\s+[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})?\s*$"
-)
 
 
 @dataclass(frozen=True)
@@ -78,7 +61,6 @@ class ScheduleRow:
     comments: str
     source_row: int
 
-
 @dataclass(frozen=True)
 class PharmacyRequirement:
     administration_date: date
@@ -89,29 +71,6 @@ class PharmacyRequirement:
     dispensed: str
     verified: str
     source_row: int
-
-
-@dataclass(frozen=True)
-class PdfPatient:
-    visit_date: date
-    visit_time: datetime
-    nhs_number: str
-    patient: str
-    page: int
-
-
-@dataclass(frozen=True)
-class PdfMedication:
-    visit_date: date
-    visit_time: datetime
-    nhs_number: str
-    patient: str
-    section: str
-    agent: str
-    course_description: str
-    dose: str
-    route: str
-    page: int
 
 @dataclass(frozen=True)
 class XlsPatient:
@@ -133,6 +92,7 @@ class XlsMedication:
     dose: str
     route: str
     source_row: int
+
 
 def clean(value) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
@@ -196,7 +156,7 @@ def format_dose(amount, unit) -> str:
     return clean(f"{amount} {unit}")
 
 
-def extract_pdf_dose(text: str) -> str:
+def extract_dose(text: str) -> str:
     text = re.sub(r"^Prescribed:\s*", "", clean(text), flags=re.I)
     match = re.match(
         r"(?P<dose>\d[\d,]*(?:\.\d+)?(?:\s*-\s*\d[\d,]*(?:\.\d+)?)?\s*"
@@ -363,6 +323,7 @@ def parse_pharmacy_requirements(path: Path) -> list[PharmacyRequirement]:
             distinct.append(item)
     return distinct
 
+
 def parse_patient_medication_xls(
     path: Path,
 ) -> tuple[list[XlsPatient], list[XlsMedication]]:
@@ -474,7 +435,7 @@ def parse_patient_medication_xls(
                 section=current_section,
                 agent=value,
                 course_description=course_description,
-                dose=extract_pdf_dose(course_description),
+                dose=extract_dose(course_description),
                 route=extract_route(course_description),
                 source_row=row_index + 1,
             )
@@ -504,98 +465,6 @@ def parse_patient_medication_xls(
     )
 
     return distinct_patients, medications
-
-
-def likely_pdf_agent_start(line: str) -> tuple[str, str] | None:
-    if not line.strip() or PDF_ADMIN_RE.match(line) or PDF_FOOTER_RE.match(line):
-        return None
-    match = re.match(
-        r"^\s*(?P<agent>[A-Za-z0-9][A-Za-z0-9 /&().,'+\-]{1,70}?)"
-        r"\s{2,}(?P<course>.+?)\s*$", line,
-    )
-    if not match:
-        return None
-    agent = clean(match.group("agent"))
-    course = PDF_DATE_AT_END_RE.sub("", clean(match.group("course")))
-    if agent.casefold() in {"active", "agent", "nhs number", "allergies"}:
-        return None
-    if not re.search(r"\b(mg|mcg|g|mmol|mL|IU|Units|dose\(s\)|tablet|capsule|"
-                     r"injection|infusion|prescribed:)\b", course, re.I):
-        return None
-    return agent, course
-
-
-def parse_pdf(path: Path) -> tuple[list[PdfPatient], list[PdfMedication]]:
-    """Return every patient found plus any Chemo lines that can be parsed."""
-    reader = PdfReader(str(path))
-    if not reader.pages:
-        raise ValueError("The Patient Medications PDF contains no pages")
-    first = reader.pages[0].extract_text(extraction_mode="layout") or ""
-    if PDF_REPORT_TITLE.casefold() not in first.casefold():
-        raise ValueError(f"Unexpected Patient Medications report: {path.name}")
-
-    patients, medications = [], []
-    for page_number, page in enumerate(reader.pages, start=1):
-        text = page.extract_text(extraction_mode="layout") or ""
-        match = PDF_PATIENT_RE.search(text)
-        if not match:
-            continue
-        visit_date = datetime.strptime(match.group("date"), "%b %d, %Y").date()
-        visit_time = datetime.combine(
-            visit_date, datetime.strptime(match.group("time"), "%H:%M").time())
-        patient = clean(match.group("patient"))
-        nhs = normalise_nhs_number(match.group("nhs"))
-        patients.append(PdfPatient(visit_date, visit_time, nhs, patient, page_number))
-
-        current_section = ""
-        current = None
-
-        def emit() -> None:
-            nonlocal current
-            if current and normalise(current["section"]) == "chemo":
-                description = clean(" ".join(current["parts"]))
-                medications.append(PdfMedication(
-                    visit_date, visit_time, nhs, patient, current["section"],
-                    current["agent"], description, extract_pdf_dose(description),
-                    extract_route(description), page_number,
-                ))
-            current = None
-
-        for raw_line in text.splitlines():
-            line, stripped = raw_line.rstrip(), clean(raw_line)
-            section_match = PDF_SECTION_RE.match(stripped)
-            if section_match:
-                emit()
-                current_section = section_match.group(1)
-                continue
-            if PDF_FOOTER_RE.match(stripped):
-                emit()
-                break
-            if PDF_ADMIN_RE.match(stripped):
-                emit()
-                continue
-            start = likely_pdf_agent_start(line)
-            if start:
-                emit()
-                current = {"section": current_section, "agent": start[0], "parts": [start[1]]}
-            elif current and stripped:
-                current["parts"].append(PDF_DATE_AT_END_RE.sub("", stripped))
-        emit()
-
-    patient_seen, distinct_patients = set(), []
-    for item in patients:
-        key = (item.visit_date, item.nhs_number)
-        if key not in patient_seen:
-            patient_seen.add(key)
-            distinct_patients.append(item)
-    med_seen, distinct_meds = set(), []
-    for item in medications:
-        key = (item.visit_date, item.nhs_number, normalise(item.agent),
-               normalise(item.course_description))
-        if key not in med_seen:
-            med_seen.add(key)
-            distinct_meds.append(item)
-    return distinct_patients, distinct_meds
 
 
 def schedule_context(appointments: list[ScheduleRow]) -> tuple:
@@ -898,6 +767,7 @@ def build_workbook(schedule_path: Path, pharmacy_path: Path, patient_meds_xls_pa
         "drug_review": len(drug_review),
     }
 
+
 def load_drug_exclusions() -> set[str]:
     """
     Load drug exclusions maintained by Pharmacy.
@@ -925,6 +795,7 @@ def load_drug_exclusions() -> set[str]:
     )
 
     return exclusions
+
 
 def main() -> int:
     log_path = configure_logging()
